@@ -44,7 +44,7 @@ import numpy as np
 from tf_agents.agents.ddpg import critic_network
 from tf_agents.agents.sac import sac_agent
 from tf_agents.drivers import dynamic_step_driver
-from tf_agents.environments import suite_mujoco, suite_gibson
+from tf_agents.environments import suite_gibson
 from tf_agents.environments import tf_py_environment
 from tf_agents.environments import parallel_py_environment
 from tf_agents.eval import metric_utils
@@ -95,6 +95,8 @@ flags.DEFINE_float('alpha_learning_rate', 3e-4,
 
 flags.DEFINE_integer('num_eval_episodes', 10,
                      'The number of episodes to run eval on.')
+flags.DEFINE_integer('eval_interval', 10000,
+                     'Run eval every eval_interval train steps')
 flags.DEFINE_boolean('eval_only', False,
                      'Whether to run evaluation only on trained checkpoints')
 flags.DEFINE_integer('gpu_c', 0,
@@ -103,8 +105,10 @@ flags.DEFINE_integer('gpu_c', 0,
 # Added for Gibson
 flags.DEFINE_string('config_file', '../test/test.yaml',
                     'Config file for the experiment.')
-flags.DEFINE_string('mode', 'headless',
+flags.DEFINE_string('env_mode', 'headless',
                     'Mode for the simulator (gui or headless)')
+flags.DEFINE_string('env_type', 'gibson',
+                    'Type for the Gibson environment (gibson or ig)')
 flags.DEFINE_float('action_timestep', 1.0 / 10.0,
                    'Action timestep for the simulator')
 flags.DEFINE_float('physics_timestep', 1.0 / 40.0,
@@ -135,7 +139,7 @@ def normal_projection_net(action_spec,
 def train_eval(
         root_dir,
         gpu=0,
-        env_load_fn=suite_mujoco.load,
+        env_load_fn=None,
         eval_env_mode='headless',
         num_iterations=1000000,
         conv_layer_params=None,
@@ -170,8 +174,8 @@ def train_eval(
         train_checkpoint_interval=10000,
         policy_checkpoint_interval=5000,
         rb_checkpoint_interval=50000,
-        log_interval=100,
-        summary_interval=100,
+        log_interval=1000,
+        summary_interval=1000,
         summaries_flush_secs=10,
         debug_summaries=False,
         summarize_grads_and_vars=False,
@@ -289,13 +293,13 @@ def train_eval(
             tf_env,
             initial_collect_policy,
             observers=replay_observer + train_metrics,
-            num_steps=initial_collect_steps).run()
+            num_steps=initial_collect_steps * num_parallel_environments).run()
 
         collect_op = dynamic_step_driver.DynamicStepDriver(
             tf_env,
             collect_policy,
             observers=replay_observer + train_metrics,
-            num_steps=collect_steps_per_iteration).run()
+            num_steps=collect_steps_per_iteration * num_parallel_environments).run()
 
         # Prepare replay buffer as dataset with invalid transitions filtered.
         def _filter_invalid_transition(trajectories, unused_arg1):
@@ -304,8 +308,8 @@ def train_eval(
         dataset = replay_buffer.as_dataset(
             sample_batch_size=5 * batch_size,
             num_steps=2).apply(tf.data.experimental.unbatch()).filter(
-            _filter_invalid_transition).batch(batch_size).prefetch(
-            batch_size * 5)
+            _filter_invalid_transition).batch(batch_size).prefetch(5)
+        # batch_size * 5)
         dataset_iterator = tf.compat.v1.data.make_initializable_iterator(dataset)
         trajectories, unused_info = dataset_iterator.get_next()
         train_op = tf_agent.train(trajectories)
@@ -315,8 +319,7 @@ def train_eval(
             summary_ops.append(train_metric.tf_summaries(
                 train_step=global_step, step_metrics=train_metrics[:2]))
 
-        with eval_summary_writer.as_default(), \
-             tf.compat.v2.summary.record_if(True):
+        with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
             for eval_metric in eval_metrics:
                 eval_metric.tf_summaries(train_step=global_step)
 
@@ -337,9 +340,25 @@ def train_eval(
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         with tf.compat.v1.Session(config=config) as sess:
+            tf.compat.v1.keras.backend.set_session(sess)
+
             # Initialize graph.
             train_checkpointer.initialize_or_restore(sess)
             rb_checkpointer.initialize_or_restore(sess)
+
+            if FLAGS.eval_only:
+                metric_utils.compute_summaries(
+                    eval_metrics,
+                    eval_py_env,
+                    eval_py_policy,
+                    num_episodes=num_eval_episodes,
+                    global_step=0,
+                    callback=eval_metrics_callback,
+                    tf_summaries=False,
+                    log=True,
+                )
+                print("EVAL DONE")
+                return
 
             # Initialize training.
             sess.run(dataset_iterator.initializer)
@@ -356,12 +375,11 @@ def train_eval(
                     eval_py_env,
                     eval_py_policy,
                     num_episodes=num_eval_episodes,
-                    global_step=global_step_val,
+                    global_step=0,
                     callback=eval_metrics_callback,
+                    tf_summaries=True,
                     log=True,
                 )
-                sess.run(eval_summary_flush_op)
-
                 # Run initial collect.
                 logging.info('Global step %d: Running initial collect op.',
                              global_step_val)
@@ -415,10 +433,17 @@ def train_eval(
                         eval_py_env,
                         eval_py_policy,
                         num_episodes=num_eval_episodes,
-                        global_step=global_step_val,
+                        global_step=0,
                         callback=eval_metrics_callback,
+                        tf_summaries=True,
                         log=True,
                     )
+                    with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
+                        with tf.name_scope('Metrics/'):
+                            success_rate_op = tf.compat.v2.summary.scalar(name='SuccessRate',
+                                                                          data=eval_py_env.get_success_rate(),
+                                                                          step=global_step_val)
+                            sess.run(success_rate_op)
                     sess.run(eval_summary_flush_op)
 
                 if global_step_val % train_checkpoint_interval == 0:
@@ -459,15 +484,15 @@ def main(_):
         gpu=FLAGS.gpu_g,
         env_load_fn=lambda mode, device_idx: suite_gibson.load(
             config_file=FLAGS.config_file,
-            env_type='gibson',
-            env_mode=FLAGS.mode,
+            env_type=FLAGS.env_type,
+            env_mode=mode,
             action_timestep=FLAGS.action_timestep,
             physics_timestep=FLAGS.physics_timestep,
             device_idx=device_idx,
             random_position=FLAGS.random_position,
             random_height=False,
         ),
-        eval_env_mode=FLAGS.mode,
+        eval_env_mode=FLAGS.env_mode,
         num_iterations=FLAGS.num_iterations,
         conv_layer_params=conv_layer_params,
         encoder_fc_layers=encoder_fc_layers,
@@ -486,8 +511,10 @@ def main(_):
         alpha_learning_rate=FLAGS.alpha_learning_rate,
         gamma=FLAGS.gamma,
         num_eval_episodes=FLAGS.num_eval_episodes,
+        eval_interval=FLAGS.eval_interval,
         eval_only=FLAGS.eval_only,
     )
+
 
 if __name__ == '__main__':
     flags.mark_flag_as_required('root_dir')
