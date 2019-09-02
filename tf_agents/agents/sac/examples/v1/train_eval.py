@@ -217,11 +217,16 @@ def train_eval(
                 fc_layer_params=encoder_fc_layers,
                 kernel_initializer=encoder_kernel_initializer,
             )),
+            'seg': tf.keras.Sequential(mlp_layers(
+                conv_layer_params=conv_layer_params,
+                fc_layer_params=encoder_fc_layers,
+                kernel_initializer=encoder_kernel_initializer,
+            )),
             'sensor': tf.keras.Sequential(mlp_layers(
                 conv_layer_params=None,
                 fc_layer_params=encoder_fc_layers,
                 kernel_initializer=encoder_kernel_initializer,
-            ))
+            )),
         }
         preprocessing_combiner = tf.keras.layers.Concatenate(axis=-1)
 
