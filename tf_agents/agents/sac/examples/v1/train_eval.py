@@ -39,7 +39,6 @@ from absl import logging
 
 import gin
 import tensorflow as tf
-import numpy as np
 
 from tf_agents.agents.ddpg import critic_network
 from tf_agents.agents.sac import sac_agent
@@ -171,11 +170,11 @@ def train_eval(
         eval_interval=10000,
         eval_only=False,
         # Params for summaries and logging
-        train_checkpoint_interval=10000,
-        policy_checkpoint_interval=5000,
-        rb_checkpoint_interval=50000,
-        log_interval=1000,
-        summary_interval=1000,
+        train_checkpoint_interval=1000,
+        policy_checkpoint_interval=1000,
+        rb_checkpoint_interval=1000,
+        log_interval=100,
+        summary_interval=100,
         summaries_flush_secs=10,
         debug_summaries=False,
         summarize_grads_and_vars=False,
@@ -208,16 +207,12 @@ def train_eval(
         time_step_spec = tf_env.time_step_spec()
         observation_spec = time_step_spec.observation
         action_spec = tf_env.action_spec()
+        print('observation_spec', observation_spec)
+        print('action_spec', action_spec)
 
-        # TODO: preprocessing_layers and preprocessing_combiner
         encoder_kernel_initializer = tf.compat.v1.keras.initializers.glorot_uniform()
         preprocessing_layers = {
-            'depth': tf.keras.Sequential(mlp_layers(
-                conv_layer_params=conv_layer_params,
-                fc_layer_params=encoder_fc_layers,
-                kernel_initializer=encoder_kernel_initializer,
-            )),
-            'seg': tf.keras.Sequential(mlp_layers(
+            'depth_seg': tf.keras.Sequential(mlp_layers(
                 conv_layer_params=conv_layer_params,
                 fc_layer_params=encoder_fc_layers,
                 kernel_initializer=encoder_kernel_initializer,
@@ -351,7 +346,7 @@ def train_eval(
             train_checkpointer.initialize_or_restore(sess)
             rb_checkpointer.initialize_or_restore(sess)
 
-            if FLAGS.eval_only:
+            if eval_only:
                 metric_utils.compute_summaries(
                     eval_metrics,
                     eval_py_env,
@@ -362,7 +357,7 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                print("EVAL DONE")
+                print('EVAL DONE')
                 return
 
             # Initialize training.
@@ -466,7 +461,7 @@ def main(_):
     logging.set_verbosity(logging.INFO)
     gin.parse_config_files_and_bindings(FLAGS.gin_file, FLAGS.gin_param)
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(FLAGS.gpu_c)
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(FLAGS.gpu_c)
 
     conv_layer_params = [(32, (8, 8), 4), (64, (4, 4), 2), (64, (3, 3), 1)]
     encoder_fc_layers = [256]
