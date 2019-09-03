@@ -357,6 +357,7 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
+                print("Success rate:", eval_py_env.get_success_rate())
                 print('EVAL DONE')
                 return
 
