@@ -98,12 +98,17 @@ flags.DEFINE_integer('eval_interval', 10000,
                      'Run eval every eval_interval train steps')
 flags.DEFINE_boolean('eval_only', False,
                      'Whether to run evaluation only on trained checkpoints')
+flags.DEFINE_boolean('eval_deterministic', False,
+                     'Whether to run evaluation using a deterministic policy')
 flags.DEFINE_integer('gpu_c', 0,
                      'GPU id for compute, e.g. Tensorflow.')
 
 # Added for Gibson
 flags.DEFINE_string('config_file', '../test/test.yaml',
                     'Config file for the experiment.')
+flags.DEFINE_list('model_ids', None,
+                  'A comma-separated list of model ids to overwrite config_file.'
+                  'len(model_ids) == num_parallel_environments')
 flags.DEFINE_string('env_mode', 'headless',
                     'Mode for the simulator (gui or headless)')
 flags.DEFINE_string('env_type', 'gibson',
@@ -139,6 +144,7 @@ def train_eval(
         root_dir,
         gpu=0,
         env_load_fn=None,
+        model_ids=None,
         eval_env_mode='headless',
         num_iterations=1000000,
         conv_layer_params=None,
@@ -169,12 +175,13 @@ def train_eval(
         num_eval_episodes=30,
         eval_interval=10000,
         eval_only=False,
+        eval_deterministic=False,
         # Params for summaries and logging
-        train_checkpoint_interval=1000,
-        policy_checkpoint_interval=1000,
-        rb_checkpoint_interval=1000,
+        train_checkpoint_interval=10000,
+        policy_checkpoint_interval=10000,
+        rb_checkpoint_interval=10000,
         log_interval=100,
-        summary_interval=100,
+        summary_interval=1000,
         summaries_flush_secs=10,
         debug_summaries=False,
         summarize_grads_and_vars=False,
@@ -199,9 +206,14 @@ def train_eval(
     global_step = tf.compat.v1.train.get_or_create_global_step()
     with tf.compat.v2.summary.record_if(
             lambda: tf.math.equal(global_step % summary_interval, 0)):
-        tf_py_env = [lambda: env_load_fn('headless', gpu)] * num_parallel_environments
+        if model_ids is None:
+            model_ids = [None] * num_parallel_environments
+        else:
+            assert len(model_ids) == num_parallel_environments,\
+                'model ids provided, but length not equal to num_parallel_environments'
+        tf_py_env = [lambda: env_load_fn(model_ids[i], 'headless', gpu) for i in range(num_parallel_environments)]
         tf_env = tf_py_environment.TFPyEnvironment(parallel_py_environment.ParallelPyEnvironment(tf_py_env))
-        eval_py_env = env_load_fn(eval_env_mode, gpu)
+        eval_py_env = env_load_fn(None, eval_env_mode, gpu)
 
         # Get the data specs from the environment
         time_step_spec = tf_env.time_step_spec()
@@ -210,22 +222,21 @@ def train_eval(
         print('observation_spec', observation_spec)
         print('action_spec', action_spec)
 
-        encoder_kernel_initializer = tf.compat.v1.keras.initializers.glorot_uniform()
+        glorot_uniform_initializer = tf.compat.v1.keras.initializers.glorot_uniform()
         preprocessing_layers = {
             'depth_seg': tf.keras.Sequential(mlp_layers(
                 conv_layer_params=conv_layer_params,
                 fc_layer_params=encoder_fc_layers,
-                kernel_initializer=encoder_kernel_initializer,
+                kernel_initializer=glorot_uniform_initializer,
             )),
             'sensor': tf.keras.Sequential(mlp_layers(
                 conv_layer_params=None,
                 fc_layer_params=encoder_fc_layers,
-                kernel_initializer=encoder_kernel_initializer,
+                kernel_initializer=glorot_uniform_initializer,
             )),
         }
         preprocessing_combiner = tf.keras.layers.Concatenate(axis=-1)
 
-        actor_kernel_initializer = tf.compat.v1.keras.initializers.glorot_uniform()
         actor_net = actor_distribution_network.ActorDistributionNetwork(
             observation_spec,
             action_spec,
@@ -233,11 +244,9 @@ def train_eval(
             preprocessing_combiner=preprocessing_combiner,
             fc_layer_params=actor_fc_layers,
             continuous_projection_net=normal_projection_net,
-            kernel_initializer=actor_kernel_initializer,
+            kernel_initializer=glorot_uniform_initializer,
         )
 
-        critic_kernel_initializer = tf.compat.v1.keras.initializers.VarianceScaling(
-            scale=1. / 3., mode='fan_in', distribution='uniform')
         critic_net = critic_network.CriticNetwork(
             (observation_spec, action_spec),
             preprocessing_layers=preprocessing_layers,
@@ -245,7 +254,7 @@ def train_eval(
             observation_fc_layer_params=critic_obs_fc_layers,
             action_fc_layer_params=critic_action_fc_layers,
             joint_fc_layer_params=critic_joint_fc_layers,
-            kernel_initializer=critic_kernel_initializer,
+            kernel_initializer=glorot_uniform_initializer,
         )
 
         tf_agent = sac_agent.SacAgent(
@@ -275,8 +284,10 @@ def train_eval(
             max_length=replay_buffer_capacity)
         replay_observer = [replay_buffer.add_batch]
 
-        eval_py_policy = py_tf_policy.PyTFPolicy(
-            greedy_policy.GreedyPolicy(tf_agent.policy))
+        if eval_deterministic:
+            eval_py_policy = py_tf_policy.PyTFPolicy(greedy_policy.GreedyPolicy(tf_agent.policy))
+        else:
+            eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.policy)
 
         train_metrics = [
             tf_metrics.NumberOfEpisodes(),
@@ -340,8 +351,6 @@ def train_eval(
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         with tf.compat.v1.Session(config=config) as sess:
-            tf.compat.v1.keras.backend.set_session(sess)
-
             # Initialize graph.
             train_checkpointer.initialize_or_restore(sess)
             rb_checkpointer.initialize_or_restore(sess)
@@ -357,7 +366,8 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                print("Success rate:", eval_py_env.get_success_rate())
+                for key, val in eval_py_env.get_running_average().items():
+                    print(key, ':', val)
                 print('EVAL DONE')
                 return
 
@@ -409,12 +419,12 @@ def train_eval(
             for _ in range(num_iterations):
                 start_time = time.time()
                 collect_call()
-                print('collect:', time.time() - start_time)
+                # print('collect:', time.time() - start_time)
 
-                train_start_time = time.time()
+                # train_start_time = time.time()
                 for _ in range(train_steps_per_iteration):
                     total_loss, _ = train_step_call()
-                print('train:', time.time() - train_start_time)
+                # print('train:', time.time() - train_start_time)
 
                 time_acc += time.time() - start_time
                 global_step_val = global_step_call()
@@ -441,10 +451,12 @@ def train_eval(
                     )
                     with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
                         with tf.name_scope('Metrics/'):
-                            success_rate_op = tf.compat.v2.summary.scalar(name='SuccessRate',
-                                                                          data=eval_py_env.get_success_rate(),
-                                                                          step=global_step_val)
-                            sess.run(success_rate_op)
+                            for key, val in eval_py_env.get_running_average().items():
+                                print(key, ':', val)
+                                metric_op = tf.compat.v2.summary.scalar(name=key,
+                                                                        data=val,
+                                                                        step=global_step_val)
+                                sess.run(metric_op)
                     sess.run(eval_summary_flush_op)
 
                 if global_step_val % train_checkpoint_interval == 0:
@@ -483,8 +495,9 @@ def main(_):
     train_eval(
         root_dir=FLAGS.root_dir,
         gpu=FLAGS.gpu_g,
-        env_load_fn=lambda mode, device_idx: suite_gibson.load(
+        env_load_fn=lambda model_id, mode, device_idx: suite_gibson.load(
             config_file=FLAGS.config_file,
+            model_id=model_id,
             env_type=FLAGS.env_type,
             env_mode=mode,
             action_timestep=FLAGS.action_timestep,
@@ -493,6 +506,7 @@ def main(_):
             random_position=FLAGS.random_position,
             random_height=False,
         ),
+        model_ids=FLAGS.model_ids,
         eval_env_mode=FLAGS.env_mode,
         num_iterations=FLAGS.num_iterations,
         conv_layer_params=conv_layer_params,

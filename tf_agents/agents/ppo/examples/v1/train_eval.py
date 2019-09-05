@@ -81,12 +81,17 @@ flags.DEFINE_integer('eval_interval', 10000,
                      'Run eval every eval_interval train steps')
 flags.DEFINE_boolean('eval_only', False,
                      'Whether to run evaluation only on trained checkpoints')
+flags.DEFINE_boolean('eval_deterministic', False,
+                     'Whether to run evaluation using a deterministic policy')
 flags.DEFINE_integer('gpu_c', 0,
                      'GPU id for compute, e.g. Tensorflow.')
 
 # Added for Gibson
 flags.DEFINE_string('config_file', '../test/test.yaml',
                     'Config file for the experiment.')
+flags.DEFINE_list('model_ids', None,
+                  'A comma-separated list of model ids to overwrite config_file.'
+                  'len(model_ids) == num_parallel_environments')
 flags.DEFINE_string('env_mode', 'headless',
                     'Mode for the simulator (gui or headless)')
 flags.DEFINE_string('env_type', 'gibson',
@@ -108,6 +113,7 @@ def train_eval(
         root_dir,
         gpu='1',
         env_load_fn=None,
+        model_ids=None,
         eval_env_mode='headless',
         conv_layer_params=None,
         encoder_fc_layers=[256],
@@ -126,6 +132,7 @@ def train_eval(
         num_eval_episodes=30,
         eval_interval=500,
         eval_only=False,
+        eval_deterministic=False,
         # Params for summaries and logging
         train_checkpoint_interval=100,
         policy_checkpoint_interval=50,
@@ -160,9 +167,14 @@ def train_eval(
     with tf.compat.v2.summary.record_if(
             lambda: tf.math.equal(global_step % summary_interval, 0)):
 
-        tf_py_env = [lambda: env_load_fn('headless', gpu)] * num_parallel_environments
+        if model_ids is None:
+            model_ids = [None] * num_parallel_environments
+        else:
+            assert len(model_ids) == num_parallel_environments,\
+                'model ids provided, but length not equal to num_parallel_environments'
+        tf_py_env = [lambda: env_load_fn(model_ids[i], 'headless', gpu) for i in range(num_parallel_environments)]
         tf_env = tf_py_environment.TFPyEnvironment(parallel_py_environment.ParallelPyEnvironment(tf_py_env))
-        eval_py_env = env_load_fn(eval_env_mode, gpu)
+        eval_py_env = env_load_fn(None, eval_env_mode, gpu)
         optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate)
 
         time_step_spec = tf_env.time_step_spec()
@@ -233,7 +245,10 @@ def train_eval(
             batch_size=num_parallel_environments,
             max_length=replay_buffer_capacity)
 
-        eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.policy)
+        if eval_deterministic:
+            eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.policy)
+        else:
+            eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.collect_policy)
 
         environment_steps_metric = tf_metrics.EnvironmentSteps()
         environment_steps_count = environment_steps_metric.result()
@@ -316,7 +331,8 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                print("Success rate:", eval_py_env.get_success_rate())
+                for key, val in eval_py_env.get_running_average().items():
+                    print(key, ':', val)
                 print('EVAL DONE')
                 return
 
@@ -348,10 +364,12 @@ def train_eval(
                     )
                     with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
                         with tf.name_scope('Metrics/'):
-                            success_rate_op = tf.compat.v2.summary.scalar(name='SuccessRate',
-                                                                          data=eval_py_env.get_success_rate(),
-                                                                          step=global_step_val)
-                            sess.run(success_rate_op)
+                            for key, val in eval_py_env.get_running_average().items():
+                                print(key, ':', val)
+                                metric_op = tf.compat.v2.summary.scalar(name=key,
+                                                                        data=val,
+                                                                        step=global_step_val)
+                                sess.run(metric_op)
                     sess.run(eval_summary_writer_flush_op)
 
                 start_time = time.time()
@@ -422,8 +440,9 @@ def main(_):
     train_eval(
         FLAGS.root_dir,
         gpu=FLAGS.gpu_g,
-        env_load_fn=lambda mode, device_idx: suite_gibson.load(
+        env_load_fn=lambda model_id, mode, device_idx: suite_gibson.load(
             config_file=FLAGS.config_file,
+            model_id=model_id,
             env_type=FLAGS.env_type,
             env_mode=mode,
             action_timestep=FLAGS.action_timestep,
@@ -432,6 +451,7 @@ def main(_):
             random_position=FLAGS.random_position,
             random_height=False,
         ),
+        model_ids=FLAGS.model_ids,
         eval_env_mode=FLAGS.env_mode,
         conv_layer_params=conv_layer_params,
         encoder_fc_layers=encoder_fc_layers,
@@ -446,7 +466,9 @@ def main(_):
         learning_rate=FLAGS.learning_rate,
         num_eval_episodes=FLAGS.num_eval_episodes,
         eval_interval=FLAGS.eval_interval,
-        eval_only=FLAGS.eval_only)
+        eval_only=FLAGS.eval_only,
+        eval_deterministic=FLAGS.eval_deterministic
+    )
 
 
 if __name__ == '__main__':
