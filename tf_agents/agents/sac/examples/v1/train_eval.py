@@ -289,16 +289,21 @@ def train_eval(
         else:
             eval_py_policy = py_tf_policy.PyTFPolicy(tf_agent.policy)
 
-        train_metrics = [
+        step_metrics = [
             tf_metrics.NumberOfEpisodes(),
             tf_metrics.EnvironmentSteps(),
-            tf_py_metric.TFPyMetric(py_metrics.AverageReturnMetric()),
-            tf_py_metric.TFPyMetric(py_metrics.AverageEpisodeLengthMetric()),
+        ]
+        train_metrics = step_metrics + [
+            tf_metrics.AverageReturnMetric(
+                buffer_size=100,
+                batch_size=num_parallel_environments),
+            tf_metrics.AverageEpisodeLengthMetric(
+                buffer_size=100,
+                batch_size=num_parallel_environments),
         ]
 
         collect_policy = tf_agent.collect_policy
-        initial_collect_policy = random_tf_policy.RandomTFPolicy(
-            tf_env.time_step_spec(), tf_env.action_spec())
+        initial_collect_policy = random_tf_policy.RandomTFPolicy(time_step_spec, action_spec)
 
         initial_collect_op = dynamic_step_driver.DynamicStepDriver(
             tf_env,
@@ -317,10 +322,10 @@ def train_eval(
             return ~trajectories.is_boundary()[0]
 
         dataset = replay_buffer.as_dataset(
+            num_parallel_calls=5,
             sample_batch_size=5 * batch_size,
             num_steps=2).apply(tf.data.experimental.unbatch()).filter(
             _filter_invalid_transition).batch(batch_size).prefetch(5)
-        # batch_size * 5)
         dataset_iterator = tf.compat.v1.data.make_initializable_iterator(dataset)
         trajectories, unused_info = dataset_iterator.get_next()
         train_op = tf_agent.train(trajectories)
@@ -328,11 +333,12 @@ def train_eval(
         summary_ops = []
         for train_metric in train_metrics:
             summary_ops.append(train_metric.tf_summaries(
-                train_step=global_step, step_metrics=train_metrics[:2]))
+                train_step=global_step, step_metrics=step_metrics))
 
         with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
             for eval_metric in eval_metrics:
-                eval_metric.tf_summaries(train_step=global_step)
+                eval_metric.tf_summaries(
+                    train_step=global_step, step_metrics=step_metrics)
 
         train_checkpointer = common.Checkpointer(
             ckpt_dir=train_dir,
@@ -348,6 +354,7 @@ def train_eval(
             max_to_keep=1,
             replay_buffer=replay_buffer)
 
+        init_agent_op = tf_agent.initialize()
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         with tf.compat.v1.Session(config=config) as sess:
@@ -366,14 +373,16 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                for key, val in eval_py_env.get_running_average().items():
-                    print(key, ':', val)
+                metrics = eval_py_env.get_running_average()
+                for key in sorted(metrics.keys()):
+                    print(key, ':', metrics[key])
                 print('EVAL DONE')
                 return
 
             # Initialize training.
             sess.run(dataset_iterator.initializer)
             common.initialize_uninitialized_variables(sess)
+            sess.run(init_agent_op)
             sess.run(train_summary_writer.init())
             sess.run(eval_summary_writer.init())
 
@@ -438,6 +447,15 @@ def train_eval(
                     timed_at_step = global_step_val
                     time_acc = 0
 
+                if global_step_val % train_checkpoint_interval == 0:
+                    train_checkpointer.save(global_step=global_step_val)
+
+                if global_step_val % policy_checkpoint_interval == 0:
+                    policy_checkpointer.save(global_step=global_step_val)
+
+                if global_step_val % rb_checkpoint_interval == 0:
+                    rb_checkpointer.save(global_step=global_step_val)
+
                 if global_step_val % eval_interval == 0:
                     metric_utils.compute_summaries(
                         eval_metrics,
@@ -451,23 +469,14 @@ def train_eval(
                     )
                     with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
                         with tf.name_scope('Metrics/'):
-                            for key, val in eval_py_env.get_running_average().items():
-                                print(key, ':', val)
+                            metrics = eval_py_env.get_running_average()
+                            for key in sorted(metrics.keys()):
+                                print(key, ':', metrics[key])
                                 metric_op = tf.compat.v2.summary.scalar(name=key,
-                                                                        data=val,
+                                                                        data=metrics[key],
                                                                         step=global_step_val)
                                 sess.run(metric_op)
                     sess.run(eval_summary_flush_op)
-
-                if global_step_val % train_checkpoint_interval == 0:
-                    train_checkpointer.save(global_step=global_step_val)
-
-                if global_step_val % policy_checkpoint_interval == 0:
-                    policy_checkpointer.save(global_step=global_step_val)
-
-                if global_step_val % rb_checkpoint_interval == 0:
-                    rb_checkpointer.save(global_step=global_step_val)
-
 
 def main(_):
     tf.compat.v1.enable_resource_variables()

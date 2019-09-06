@@ -305,8 +305,7 @@ def train_eval(
             summary_ops.append(train_metric.tf_summaries(
                 train_step=global_step, step_metrics=step_metrics))
 
-        with eval_summary_writer.as_default(), \
-             tf.compat.v2.summary.record_if(True):
+        with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
             for eval_metric in eval_metrics:
                 eval_metric.tf_summaries(
                     train_step=global_step, step_metrics=step_metrics)
@@ -331,8 +330,9 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                for key, val in eval_py_env.get_running_average().items():
-                    print(key, ':', val)
+                metrics = eval_py_env.get_running_average()
+                for key in sorted(metrics.keys()):
+                    print(key, ':', metrics[key])
                 print('EVAL DONE')
                 return
 
@@ -364,10 +364,11 @@ def train_eval(
                     )
                     with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
                         with tf.name_scope('Metrics/'):
-                            for key, val in eval_py_env.get_running_average().items():
-                                print(key, ':', val)
+                            metrics = eval_py_env.get_running_average()
+                            for key in sorted(metrics.keys()):
+                                print(key, ':', metrics[key])
                                 metric_op = tf.compat.v2.summary.scalar(name=key,
-                                                                        data=val,
+                                                                        data=metrics[key],
                                                                         step=global_step_val)
                                 sess.run(metric_op)
                     sess.run(eval_summary_writer_flush_op)
