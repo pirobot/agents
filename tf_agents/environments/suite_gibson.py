@@ -25,6 +25,7 @@ import gibson2
 @gin.configurable
 def load(config_file,
          model_id=None,
+         collision_reward_weight=0.0,
          env_type='gibson',
          env_mode='headless',
          action_timestep=1.0 / 10.0,
@@ -53,6 +54,7 @@ def load(config_file,
     elif env_type == 'ig':
         env = InteractiveGibsonNavigateEnv(config_file=config_file,
                                            model_id=model_id,
+                                           collision_reward_weight=collision_reward_weight,
                                            mode=env_mode,
                                            action_timestep=action_timestep,
                                            physics_timestep=physics_timestep,

@@ -92,6 +92,8 @@ flags.DEFINE_string('config_file', '../test/test.yaml',
 flags.DEFINE_list('model_ids', None,
                   'A comma-separated list of model ids to overwrite config_file.'
                   'len(model_ids) == num_parallel_environments')
+flags.DEFINE_float('collision_reward_weight', 0.0,
+                   'collision reward weight')
 flags.DEFINE_string('env_mode', 'headless',
                     'Mode for the simulator (gui or headless)')
 flags.DEFINE_string('env_type', 'gibson',
@@ -444,6 +446,7 @@ def main(_):
         env_load_fn=lambda model_id, mode, device_idx: suite_gibson.load(
             config_file=FLAGS.config_file,
             model_id=model_id,
+            collision_reward_weight=FLAGS.collision_reward_weight,
             env_type=FLAGS.env_type,
             env_mode=mode,
             action_timestep=FLAGS.action_timestep,
