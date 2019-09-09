@@ -242,6 +242,10 @@ def train_eval(
             summarize_grads_and_vars=summarize_grads_and_vars,
             train_step_counter=global_step)
 
+        config = tf.compat.v1.ConfigProto()
+        config.gpu_options.allow_growth = True
+        sess = tf.compat.v1.Session(config=config)
+
         replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
             tf_agent.collect_data_spec,
             batch_size=num_parallel_environments,
@@ -314,9 +318,7 @@ def train_eval(
 
         init_agent_op = tf_agent.initialize()
 
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        with tf.compat.v1.Session(config=config) as sess:
+        with sess.as_default():
             # Initialize graph.
             train_checkpointer.initialize_or_restore(sess)
             rb_checkpointer.initialize_or_restore(sess)
@@ -417,6 +419,8 @@ def train_eval(
                 log=True,
             )
             sess.run(eval_summary_writer_flush_op)
+
+        sess.close()
 
 
 def main(_):

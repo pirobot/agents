@@ -279,6 +279,11 @@ def train_eval(
             debug_summaries=debug_summaries,
             summarize_grads_and_vars=summarize_grads_and_vars,
             train_step_counter=global_step)
+
+        config = tf.compat.v1.ConfigProto()
+        config.gpu_options.allow_growth = True
+        sess = tf.compat.v1.Session(config=config)
+
         # Make the replay buffer.
         replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
             data_spec=tf_agent.collect_data_spec,
@@ -357,9 +362,7 @@ def train_eval(
             replay_buffer=replay_buffer)
 
         init_agent_op = tf_agent.initialize()
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        with tf.compat.v1.Session(config=config) as sess:
+        with sess.as_default():
             # Initialize graph.
             train_checkpointer.initialize_or_restore(sess)
             rb_checkpointer.initialize_or_restore(sess)
@@ -479,6 +482,8 @@ def train_eval(
                                                                         step=global_step_val)
                                 sess.run(metric_op)
                     sess.run(eval_summary_flush_op)
+
+        sess.close()
 
 def main(_):
     tf.compat.v1.enable_resource_variables()
