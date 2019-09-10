@@ -49,7 +49,7 @@ from tf_agents.environments import parallel_py_environment
 from tf_agents.eval import metric_utils
 from tf_agents.metrics import py_metrics
 from tf_agents.metrics import tf_metrics
-from tf_agents.metrics import tf_py_metric
+from tf_agents.metrics import batched_py_metric
 from tf_agents.networks import actor_distribution_network
 from tf_agents.networks import normal_projection_network
 from tf_agents.networks.utils import mlp_layers
@@ -58,6 +58,8 @@ from tf_agents.policies import py_tf_policy
 from tf_agents.policies import random_tf_policy
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.utils import common
+from tf_agents.utils import episode_utils
+
 
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
                     'Root directory for writing logs/summaries/checkpoints.')
@@ -74,6 +76,8 @@ flags.DEFINE_integer('collect_steps_per_iteration', 1,
                      'Number of steps to collect and be added to the replay buffer after every training iteration')
 flags.DEFINE_integer('num_parallel_environments', 1,
                      'Number of environments to run in parallel')
+flags.DEFINE_integer('num_parallel_environments_eval', 1,
+                     'Number of environments to run in parallel for eval')
 flags.DEFINE_integer('replay_buffer_capacity', 1000000,
                      'Replay buffer capacity per env.')
 flags.DEFINE_integer('train_steps_per_iteration', 1,
@@ -109,6 +113,9 @@ flags.DEFINE_string('config_file', '../test/test.yaml',
 flags.DEFINE_list('model_ids', None,
                   'A comma-separated list of model ids to overwrite config_file.'
                   'len(model_ids) == num_parallel_environments')
+flags.DEFINE_list('model_ids_eval', None,
+                  'A comma-separated list of model ids to overwrite config_file for eval.'
+                  'len(model_ids) == num_parallel_environments_eval')
 flags.DEFINE_float('collision_reward_weight', 0.0,
                    'collision reward weight')
 flags.DEFINE_string('env_mode', 'headless',
@@ -178,10 +185,12 @@ def train_eval(
         eval_interval=10000,
         eval_only=False,
         eval_deterministic=False,
+        num_parallel_environments_eval=1,
+        model_ids_eval=None,
         # Params for summaries and logging
         train_checkpoint_interval=10000,
         policy_checkpoint_interval=10000,
-        rb_checkpoint_interval=10000,
+        rb_checkpoint_interval=50000,
         log_interval=100,
         summary_interval=1000,
         summaries_flush_secs=10,
@@ -200,8 +209,14 @@ def train_eval(
     eval_summary_writer = tf.compat.v2.summary.create_file_writer(
         eval_dir, flush_millis=summaries_flush_secs * 1000)
     eval_metrics = [
-        py_metrics.AverageReturnMetric(buffer_size=num_eval_episodes),
-        py_metrics.AverageEpisodeLengthMetric(buffer_size=num_eval_episodes),
+        batched_py_metric.BatchedPyMetric(
+            py_metrics.AverageReturnMetric,
+            metric_args={'buffer_size': num_eval_episodes},
+            batch_size=num_parallel_environments_eval),
+        batched_py_metric.BatchedPyMetric(
+            py_metrics.AverageEpisodeLengthMetric,
+            metric_args={'buffer_size': num_eval_episodes},
+            batch_size=num_parallel_environments_eval),
     ]
     eval_summary_flush_op = eval_summary_writer.flush()
 
@@ -213,9 +228,21 @@ def train_eval(
         else:
             assert len(model_ids) == num_parallel_environments,\
                 'model ids provided, but length not equal to num_parallel_environments'
+
+        if model_ids_eval is None:
+            model_ids_eval = [None] * num_parallel_environments_eval
+        else:
+            assert len(model_ids_eval) == num_parallel_environments_eval,\
+                'model ids eval provided, but length not equal to num_parallel_environments_eval'
+
         tf_py_env = [lambda: env_load_fn(model_ids[i], 'headless', gpu) for i in range(num_parallel_environments)]
         tf_env = tf_py_environment.TFPyEnvironment(parallel_py_environment.ParallelPyEnvironment(tf_py_env))
-        eval_py_env = env_load_fn(None, eval_env_mode, gpu)
+
+        if eval_env_mode == 'gui':
+            assert num_parallel_environments_eval == 1, 'only one GUI env is allowed'
+        eval_py_env = [lambda: env_load_fn(model_ids_eval[i], eval_env_mode, gpu)
+                       for i in range(num_parallel_environments_eval)]
+        eval_py_env = parallel_py_environment.ParallelPyEnvironment(eval_py_env)
 
         # Get the data specs from the environment
         time_step_spec = tf_env.time_step_spec()
@@ -378,9 +405,14 @@ def train_eval(
                     tf_summaries=False,
                     log=True,
                 )
-                metrics = eval_py_env.get_running_average()
+                episodes = eval_py_env.get_stored_episodes()
+                episodes = [episode for sublist in episodes for episode in sublist][:num_eval_episodes]
+                metrics = episode_utils.get_metrics(episodes)
                 for key in sorted(metrics.keys()):
                     print(key, ':', metrics[key])
+
+                save_path = os.path.join(eval_dir, 'episodes.pkl')
+                episode_utils.save(episodes, save_path)
                 print('EVAL DONE')
                 return
 
@@ -474,7 +506,9 @@ def train_eval(
                     )
                     with eval_summary_writer.as_default(), tf.compat.v2.summary.record_if(True):
                         with tf.name_scope('Metrics/'):
-                            metrics = eval_py_env.get_running_average()
+                            episodes = eval_py_env.get_stored_episodes()
+                            episodes = [episode for sublist in episodes for episode in sublist][:num_eval_episodes]
+                            metrics = episode_utils.get_metrics(episodes)
                             for key in sorted(metrics.keys()):
                                 print(key, ':', metrics[key])
                                 metric_op = tf.compat.v2.summary.scalar(name=key,
@@ -545,6 +579,8 @@ def main(_):
         num_eval_episodes=FLAGS.num_eval_episodes,
         eval_interval=FLAGS.eval_interval,
         eval_only=FLAGS.eval_only,
+        num_parallel_environments_eval=FLAGS.num_parallel_environments_eval,
+        model_ids_eval=FLAGS.model_ids_eval,
     )
 
 
@@ -552,12 +588,3 @@ if __name__ == '__main__':
     flags.mark_flag_as_required('root_dir')
     flags.mark_flag_as_required('config_file')
     app.run(main)
-
-"""
-TODO:
-1) AverageSuccessRateMetric, TFAverageSuccessRateMetric
-2) Understand replay buffer abnormality
-    a) use 5 * batch_size
-    b) do unbatch and batch
-    c) filter trajectory that is at the boundary of episodes (_filter_invalid_transition)
-"""
