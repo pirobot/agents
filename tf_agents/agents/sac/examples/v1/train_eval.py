@@ -78,7 +78,7 @@ flags.DEFINE_integer('num_parallel_environments', 1,
                      'Number of environments to run in parallel')
 flags.DEFINE_integer('num_parallel_environments_eval', 1,
                      'Number of environments to run in parallel for eval')
-flags.DEFINE_integer('replay_buffer_capacity', 1000000,
+flags.DEFINE_integer('replay_buffer_capacity', 50000,
                      'Replay buffer capacity per env.')
 flags.DEFINE_integer('train_steps_per_iteration', 1,
                      'Number of training steps in every training iteration')
@@ -128,7 +128,7 @@ flags.DEFINE_float('physics_timestep', 1.0 / 40.0,
                    'Physics timestep for the simulator')
 flags.DEFINE_integer('gpu_g', 0,
                      'GPU id for graphics, e.g. Gibson.')
-flags.DEFINE_boolean('random_position', False,
+flags.DEFINE_boolean('random_position', True,
                      'Whether to randomize initial and target position')
 
 FLAGS = flags.FLAGS
@@ -181,7 +181,7 @@ def train_eval(
         reward_scale_factor=1.0,
         gradient_clipping=None,
         # Params for eval
-        num_eval_episodes=30,
+        num_eval_episodes=500,
         eval_interval=10000,
         eval_only=False,
         eval_deterministic=False,
@@ -254,7 +254,7 @@ def train_eval(
 
         glorot_uniform_initializer = tf.compat.v1.keras.initializers.glorot_uniform()
         preprocessing_layers = {
-            'depth_seg': tf.keras.Sequential(mlp_layers(
+            'depth': tf.keras.Sequential(mlp_layers(
                 conv_layer_params=conv_layer_params,
                 fc_layer_params=encoder_fc_layers,
                 kernel_initializer=glorot_uniform_initializer,
@@ -311,6 +311,9 @@ def train_eval(
         config = tf.compat.v1.ConfigProto()
         config.gpu_options.allow_growth = True
         sess = tf.compat.v1.Session(config=config)
+
+        #gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
+        #sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 
         # Make the replay buffer.
         replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
